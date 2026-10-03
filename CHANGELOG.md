@@ -1,4 +1,9 @@
-# Changelog\n\n## myuplink 1.2.3\n\nRecord NIBE F750 as hardware-tested with the existing read-only MyUplink Cloud REST API v2 driver. OAuth connection and live telemetry were verified on an F750 in FTW; observed points included BT1 average outdoor temperature, BT12 condenser temperature and more than 100 additional heat-pump telemetry points. No control or write path is added.\n
+# Changelog
+
+## myuplink 1.2.3
+
+Record NIBE F750 as hardware-tested with the existing read-only MyUplink Cloud REST API v2 driver. OAuth connection and live telemetry were verified on an F750 in FTW; observed points included BT1 average outdoor temperature, BT12 condenser temperature and more than 100 additional heat-pump telemetry points. No control or write path is added.
+
 
 ## vag_vehicle 0.2.0
 
