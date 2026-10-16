@@ -30,6 +30,13 @@
 -- session Cookie header instead, and the driver stops emitting when it
 -- expires.
 --
+-- Which car is plugged in (FTW docs/cars.md, rule 2): the dataset's plug
+-- state gives `plugged`. The portal writes a file about every 15 minutes,
+-- too seldom to date a plug-in, so the driver sends no plugged_since_ms; a
+-- fresh "disconnected" still tells Core this car is not the one plugged in.
+-- The datasets this driver was written from carry no position, so it gives
+-- no site_distance_m.
+--
 -- Age: the SoC data point carries the time the car measured it, and the
 -- portal's Date header gives the time now, so the driver reports the
 -- reading's age as `vehicle_soc_age_s` without a wall clock of its own.
@@ -66,7 +73,7 @@ DRIVER = {
   id           = "vag_vehicle",
   name         = "VAG Vehicle (EU Data Act)",
   manufacturer = "Volkswagen Group",
-  version      = "0.2.1",
+  version      = "0.3.0",
   protocols    = { "http" },
   capabilities = { "vehicle" },
   read_only    = true,
@@ -200,6 +207,8 @@ local last = {
   known_age = false,
   -- Seconds between the car's measurement and the read, when known.
   measured_age_s = nil,
+  -- The dataset's plug state; nil when unknown.
+  plugged = nil,
 }
 
 -- Logs get pasted into public issues, and a VIN identifies the owner's
@@ -1059,15 +1068,37 @@ local function newest_dataset(list)
   return best
 end
 
+-- FTW reads a vehicle soc of 1 or less as a fraction, and more as a
+-- percent; FTW before 0.131 reads every value as a percent. A percent above
+-- 1 means the same to both, so only 1 % or less goes as a fraction: 0.01 is
+-- 1 % to a new FTW and 0.01 % to an old one, where a plain 1 would be 100 %.
+local function soc_value(pct)
+  if pct <= 1 then return pct / 100 end
+  return pct
+end
+
 local function emit_reading(soc, limit, state, ttf, fresh, stale)
   host.emit("vehicle", {
-    soc = soc,
+    soc = soc_value(soc),
     charge_limit_pct = limit,
     charging_state = state,
     time_to_full_min = ttf,
+    plugged = last.plugged,
     stale = stale,
     soc_fresh = fresh,
   })
+end
+
+-- "connected" and "disconnected" are the plug states the portal writes;
+-- anything else is unknown, not unplugged.
+local function remember_plug(point)
+  local v = point and lower(point.value) or ""
+  last.plugged = nil
+  if v == "connected" then
+    last.plugged = true
+  elseif v == "disconnected" then
+    last.plugged = false
+  end
 end
 
 -- The reading's age now: measured age at the read plus time since.
@@ -1323,6 +1354,7 @@ function driver_poll()
   local ttf = ttf_p and num(ttf_p.value) or nil
   if ttf == 65535 then ttf = nil end
   local state = map_charging_state(points)
+  remember_plug(lookup(points, PLUG_IDS))
 
   local known_age = name ~= baseline_file
   local fresh = known_age
@@ -1372,4 +1404,5 @@ function driver_cleanup()
   last.time_to_full = nil
   last.known_age = false
   last.ts_ms = 0
+  last.plugged = nil
 end
