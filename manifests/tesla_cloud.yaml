@@ -1,5 +1,5 @@
 name: "tesla_cloud"
-version: "0.1.1"
+version: "0.2.0"
 tier: community
 author: "Sourceful Labs AB"
 protocol: http
@@ -13,12 +13,12 @@ tested_devices:
     variants: [Model Y, Model 3]
     regions: [EU, NA, CN]
     firmware_versions: ""
-    notes: "Read-only vehicle SoC, charge limit and charging state via the official Tesla Fleet API. Optional next to tesla_vehicle (BLE proxy). Does not wake or command the car. Not yet run against a car."
+    notes: "Read-only vehicle SoC, charge limit, charging state and charge cable via the official Tesla Fleet API. Grant the optional vehicle_location scope to report the car's distance from the site; the coordinates stay in the driver. Optional next to tesla_vehicle (BLE proxy). Does not wake or command the car. Not yet run against a car."
     min_driver_version: "0.1.0"
 min_host_version: "2.0.0"
-size_bytes: 18216
+size_bytes: 22431
 dkb_id: "tesla_cloud"
-sha256: "ed608e4a4501f7a9534296989bb083bb7960ebf8456bd760d868cb26069ea484"
+sha256: "deab2cc377cdae9bbc32a14e686b05830b1e094154a090a401d60f666646653e"
 signature: ""
 
 bytecode_sha256: ""

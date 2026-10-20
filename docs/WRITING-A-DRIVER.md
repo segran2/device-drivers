@@ -346,6 +346,32 @@ make check
 `make check` regenerates `index.yaml`, `devices.yaml`, `support-status.json`
 and the manifest hashes. Commit what it produces — it fails if those are stale.
 
+## A car says where it is plugged in
+
+A vehicle driver can help FTW tell which car is on a charger. Emit
+`plugged`, and when the source knows them, `plugged_since_ms` and `at_site`
+or `site_distance_m`. The fields are in
+[`spec/host-api.md`](../spec/host-api.md#vehicle-ftw).
+
+- **Date only what you saw happen.** Send `plugged_since_ms` only when the
+  source reads the cable at least every 30 seconds. A car read every few
+  minutes shows a plug-in minutes late, and FTW would match it to the wrong
+  charger or to none. A value the driver saw at its first reading, or one a
+  broker redelivers after a reconnect, has no known time: leave it out.
+- **Prefer the source's own idea of home.** A Home Assistant zone or a
+  TeslaMate geofence gives `at_site`. Measuring against
+  `host.site_location()` is the fallback: that position is a weather pin.
+- **Keep the coordinates in the driver.** Emit only `site_distance_m`,
+  rounded to the metre.
+- **Unknown is not false.** A cable state or a place the source does not
+  know is `nil`. A wrong `false` tells FTW the car is somewhere else.
+- **No extra reads.** The cable and the place come with the reads the level
+  already needs. Never wake a car, or add a billed request, to learn them.
+- **A level of 1 % goes as 0.01.** FTW reads a vehicle `soc` of 1 as 100 %.
+
+`home_assistant_vehicle`, `tesla_cloud`, `teslamate_vehicle` and
+`vag_vehicle` show the patterns.
+
 ## Testing
 
 The harness is at `drivers/tests/lua_harness/`. `host_mock.lua` lets you set

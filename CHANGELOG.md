@@ -1,11 +1,102 @@
 # Changelog
 
-## easee_cloud 1.3.7
+## [Unreleased]
+
+### easee_cloud 1.3.7
 
 - Keep a load-balancing ReasonForNoCurrent while the car charges, when the per-phase current is at least 2 A below the offer. Easee records the reason when it changes, so a limit that began before the last power change was dropped and FTW said the charger had given no reason. The offer is observation 48, or FTW's last write when that is missing. Other old reasons are still dropped while the car charges.
 - Report `current_limited_by = "load_balancer"` for codes 1–5, 10 and 25–30 while a car is connected. Core reads this name, not Easee's codes. The charger's own limits (77, 78) and the car are not the load balancer.
 - Match the labels for codes 6, 8–11, 25–30 and 77 to Easee's published table. Code 28 read "fuse limit reached"; Easee calls it "Current limited by Equalizer". The enumeration page joins `upstream_docs`.
 - Not yet seen on hardware. Easee's table defines the "Current limited by …" codes, but no raw observation from a load-balanced charger has been captured.
+
+### home_assistant_vehicle 0.1.0
+
+A new read-only driver for a car whose level Home Assistant already reads. A
+Home Assistant automation publishes one JSON message over MQTT; the driver
+subscribes, emits every 5 seconds and holds no Home Assistant token. It
+reads the level, charge limit and charging state, and, when the automation
+maps them, the charge cable (`plugged`) and the car's place (`at_site` from
+a tracker in zone home). The automation may add `plugged_since` from
+`last_changed`, but only when the integration reads the cable at least
+every 30 seconds: `last_changed` is when Home Assistant read the change.
+The header carries the automation for the Tesla Custom Integration.
+Messages from a Model Y on that integration, recorded on 15 October 2026,
+are the test fixtures.
+
+### tesla_cloud 0.2.0
+
+Report the charge cable (`plugged`, from `conn_charge_cable`, else the
+charging state). No cable time: the driver reads the car minutes apart. With
+a site position from FTW and the optional `vehicle_location` scope, the same
+`vehicle_data` read asks for `location_data`, and the driver emits the car's
+distance from the site (`site_distance_m`), never its coordinates. A token
+without the scope gets HTTP 403 for that read; the driver then reads
+`charge_state` alone and asks again a day later. No request is added and no
+car is woken. A level of 1 % goes as 0.01.
+
+### teslamate_vehicle 0.2.0
+
+Report the charge cable from TeslaMate's `plugged_in`. A change is dated
+(`plugged_since_ms`, by the box's clock) only when a live update carries it:
+a `healthy` message within 10 seconds. A retained value, at subscribe or
+redelivered after the broker reconnects, has no known time. With `geofence`
+set to this site's TeslaMate geofence, the geofence topic gives `at_site`;
+otherwise `latitude` and `longitude` give the distance from the site. The
+coordinates are not emitted. A level of 1 % goes as 0.01.
+
+### vag_vehicle 0.3.0
+
+Report the charge cable from the Data Act dataset's plug state. No cable
+time: the portal writes every 15 minutes. A plug state other than connected
+or disconnected is unknown, not unplugged. The datasets carry no position.
+A level of 1 % goes as 0.01.
+
+### tesla_vehicle 0.2.6
+
+A level of 1 % goes as 0.01. FTW reads a vehicle `soc` of 1 as 100 %, so a
+car at 1 % looked full.
+
+### pixii_pv 0.3.3
+
+Report zero PV generation when the measured phase sum is negative. Negating
+that sum used to emit positive PV power, which FTW rejects, so fresh readings
+could leave PV stale or missing after sunset. Sum the phases before limiting
+generation to zero; keep their signed diagnostic values. Missing, invalid or
+non-finite phase power emits no PV reading. Idle polls do not refresh PV.
+
+## pixii 2.1.9
+
+A power cut left the driver offline until someone restarted it. Each register
+keeps its own failure count and stops being read after three misses. When the
+Pixii boots slower than FTW, every read fails for about fifteen seconds,
+three polls at five seconds, and every register is retired. The device then
+answers and the driver never asks again.
+
+Misses count on a poll where some other register answered. A poll where every
+read fails leaves the counts unchanged: the device is unreachable. The next
+poll that gets an answer clears the counts. Register 40288 on PowerShaper
+firmware below CPU 2.0.23 still stops after three misses while the device is
+answering other registers, and is tried again every five minutes.
+
+FTW's bundled copy does not move with this commit. Bump the pin and run
+`scripts/sync-bundled-drivers.sh` (srcfl/ftw#1620).
+
+## sungrow 1.6.0
+
+Read the live values once a second. `driver_poll` returns 1000 ms. Each poll
+reads grid, PV and battery power, SoC, per-phase values and the EMS readback.
+Energy counters, rated power, temperature, frequency and fault bits keep the
+five-second rate. Between those reads each blob carries their last values, but
+only when its own power read succeeded this poll. FTW stores each emit whole,
+and its energy ledger starts over whenever a counter drops out.
+
+A host that ignores the returned interval still polls every five seconds, and
+then every poll reads everything, as before. FTW honours the return from
+srcfl/ftw#1616.
+
+A read FTW refused while it waited to reconnect no longer counts toward
+treating a register as absent. At one poll per second, a two-second wait would
+otherwise mark a whole block absent after one dropped packet.
 
 ## Tests: no invented numbers
 
