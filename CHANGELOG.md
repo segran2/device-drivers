@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### easee_cloud 1.3.8
+### easee_cloud 1.3.9
 
 - Reject power observations that move backwards in source time, and conflicting values at the same physical time. Compare RFC3339 instants with UTC offsets and fractional precision normalized. An old cloud zero can no longer replace a newer sample, nor can an old positive sample resurrect an observed stop.
 - Connected chargers with missing or malformed power timestamps emit no fresh measurement. Unchanged valid values remain confirmable, and newer zero observations remain valid. A confirmed disconnect resets the session ordering.
