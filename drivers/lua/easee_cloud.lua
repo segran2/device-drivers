@@ -29,7 +29,7 @@ DRIVER = {
   id           = "easee_cloud",
   name         = "Easee Cloud",
   manufacturer = "Easee",
-  version      = "1.4.0",
+  version      = "1.4.1",
   protocols    = { "http" },
   capabilities = { "ev" },
   description  = "Easee Home/Charge via Cloud REST API. No local protocol needed.",
@@ -292,9 +292,11 @@ end
 
 -- Observation IDs (from developer.easee.com/docs/charger-observation-ids)
 local OBS_DYN_CURRENT     = 48
+local OBS_ALLOCATED_L1    = 70   -- circuit total allocated current L1; L2 71, L3 72
 local OBS_REASON_NO_CUR   = 96
 local OBS_CABLE_LOCKED    = 103
 local OBS_OP_MODE         = 109
+local OBS_OUTPUT_CURRENT  = 114  -- current signalled to the car with the pilot
 local OBS_TOTAL_POWER     = 120
 local OBS_SESSION_ENERGY  = 121
 local OBS_LIFETIME_ENERGY = 124
@@ -302,7 +304,7 @@ local OBS_CURRENT         = 183
 local OBS_VOLTAGE         = 194
 local OBS_SESSION_START   = 223
 
-local OBS_IDS = "48,96,103,109,120,121,124,183,194,223"
+local OBS_IDS = "48,70,71,72,96,103,109,114,120,121,124,183,194,223"
 local OBS_WANTED = {}
 for id in OBS_IDS:gmatch("%d+") do OBS_WANTED[tonumber(id)] = true end
 
@@ -311,14 +313,44 @@ for id in OBS_IDS:gmatch("%d+") do OBS_WANTED[tonumber(id)] = true end
 -- stays current until a newer one arrives.
 local latest, latest_at, latest_pushed = {}, {}, {}
 
--- source_time_key makes an RFC 3339 UTC time comparable as a string,
--- whatever its fractional precision: "…:05Z" and "…:05.120+00:00" become
--- "…:05.120000000" and "…:05.120000000". Other offsets give nil.
+-- source_time_key makes an RFC 3339 time comparable as a string: seconds
+-- since 1970 and nine fractional digits, whatever the offset and precision,
+-- so "…03:49:08.1Z" and "…05:49:08.1000000+02:00" give the same key. A time
+-- that is not RFC 3339, or names a day that does not exist, gives nil.
+-- Written by Segran for srcfl/device-drivers#183.
 local function source_time_key(stamp)
     if type(stamp) ~= "string" then return nil end
-    local base, frac, zone = stamp:match("^(%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d)(%.?%d*)(.*)$")
-    if not base or (zone ~= "Z" and zone ~= "+00:00") then return nil end
-    return base .. "." .. (frac:sub(2) .. "000000000"):sub(1, 9)
+    local year, month, day, hour, minute, second, suffix = stamp:match(
+        "^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)(.*)$")
+    if not year then return nil end
+    year, month, day = tonumber(year), tonumber(month), tonumber(day)
+    hour, minute, second = tonumber(hour), tonumber(minute), tonumber(second)
+    if year < 1970 or month < 1 or month > 12 or hour > 23 or minute > 59 or second > 59 then return nil end
+    local leap = year % 4 == 0 and (year % 100 ~= 0 or year % 400 == 0)
+    local lengths = {31, leap and 29 or 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+    if day < 1 or day > lengths[month] then return nil end
+    local fraction = ""
+    if suffix:sub(1, 1) == "." then
+        local digits, zone = suffix:match("^%.(%d+)(.*)$")
+        if not digits or #digits > 9 then return nil end
+        fraction, suffix = digits, zone
+    end
+    local offset = 0
+    if suffix ~= "Z" then
+        local sign, oh, om = suffix:match("^([+-])(%d%d):(%d%d)$")
+        if not sign then return nil end
+        oh, om = tonumber(oh), tonumber(om)
+        if oh > 23 or om > 59 then return nil end
+        offset = (oh * 60 + om) * 60 * (sign == "+" and 1 or -1)
+    end
+    local function leaps(y)
+        return math.floor(y / 4) - math.floor(y / 100) + math.floor(y / 400)
+    end
+    local days = 365 * (year - 1970) + leaps(year - 1) - leaps(1969) + day - 1
+    for m = 1, month - 1 do days = days + lengths[m] end
+    local seconds = days * 86400 + hour * 3600 + minute * 60 + second - offset
+    if seconds < 0 then return nil end
+    return string.format("%012d", seconds) .. "." .. fraction .. string.rep("0", 9 - #fraction)
 end
 
 -- note_observation records a sample. SignalR delivers one connection's
@@ -386,7 +418,40 @@ local function state_problem(obs)
     return nil
 end
 
--- get_observations reads REST. The caller checks the reply with state_problem.
+-- REST can answer from an older cache after a newer reply: a late reply once
+-- turned a measured 10.242 kW into 0 W (srcfl/device-drivers#183). While a
+-- car is connected, a REST reply is not used when its power time goes back
+-- from the last one used, gives another value at the same instant, or
+-- cannot be read. A disconnect starts the order again, and so do replies
+-- that have gone back for UNORDERED_RESET_MS: then the newer time was wrong,
+-- for example a stamp from the future, and must not hold the driver silent.
+local UNORDERED_RESET_MS = 30000
+local accepted_power_key, accepted_power_value = nil, nil
+local unordered_since_ms = nil
+local function power_order_problem(obs, stamps, now)
+    if obs[OBS_OP_MODE] == 1 then
+        accepted_power_key, accepted_power_value, unordered_since_ms = nil, nil, nil
+        return nil
+    end
+    local key = source_time_key(stamps[OBS_TOTAL_POWER])
+    if not key then return "missing or invalid power source timestamp" end
+    local problem = nil
+    if accepted_power_key and key < accepted_power_key then
+        problem = "out-of-order power observation"
+    elseif key == accepted_power_key and obs[OBS_TOTAL_POWER] ~= accepted_power_value then
+        problem = "conflicting power at one source timestamp"
+    end
+    if problem then
+        unordered_since_ms = unordered_since_ms or now
+        if now - unordered_since_ms < UNORDERED_RESET_MS then return problem end
+        host.log("warn", "Easee: power times went back for 30 s; using the newest reply")
+    end
+    accepted_power_key, accepted_power_value, unordered_since_ms = key, obs[OBS_TOTAL_POWER], nil
+    return nil
+end
+
+-- get_observations reads REST. The caller checks the reply with state_problem
+-- and power_order_problem.
 local function get_observations(serial)
     local url = "https://api.easee.com/state/" .. serial .. "/observations?ids=" .. OBS_IDS
     local resp, err = safe_http_get(url, auth_headers())
@@ -613,7 +678,7 @@ local function owe(id, key, value, now, why)
 end
 
 -- stream_update records a pushed sample. One Core could not read, with a
--- time that is not RFC 3339 UTC, is skipped, and so is a state, power or
+-- time that is not RFC 3339, is skipped, and so is a state, power or
 -- energy reading that is not a number; the stream then owes that reading.
 -- Before the subscription completes the stream replays its current state,
 -- which can be older than a REST read just before it; the newer one stays.
@@ -733,18 +798,18 @@ local REASON_LABELS = {
     [3]   = "offline fallback circuit current too low",
     [4]   = "circuit fuse too low",
     [5]   = "waiting in queue",
-    [6]   = "waiting (other cars fully charged)",
+    [6]   = "waiting in fully charged queue",
     [7]   = "illegal grid type",
-    [8]   = "no current request from primary",
-    [9]   = "max dynamic charger current too low",
-    [10]  = "phase imbalance",
-    [11]  = "equalizer communication lost",
-    [25]  = "equalizer dynamic limit too low",
-    [26]  = "equalizer static limit too low",
-    [27]  = "offline fallback equalizer too low",
-    [28]  = "fuse limit reached",
-    [29]  = "current limited by equalizer",
-    [30]  = "current limited by offline equalizer",
+    [8]   = "no current request from car",
+    [9]   = "master communication lost",
+    [10]  = "equalizer current too low",
+    [11]  = "phase not connected",
+    [25]  = "current limited by circuit fuse",
+    [26]  = "current limited by circuit max current",
+    [27]  = "current limited by dynamic circuit current",
+    [28]  = "current limited by equalizer",
+    [29]  = "current limited by circuit load balancing",
+    [30]  = "current limited by offline settings",
     [50]  = "secondary unit not requesting current",
     [51]  = "max charger current too low",
     [52]  = "max dynamic charger current too low",
@@ -755,7 +820,7 @@ local REASON_LABELS = {
     [57]  = "erratic EV",
     [75]  = "limited by cable rating",
     [76]  = "limited by schedule",
-    [77]  = "limited by charger current",
+    [77]  = "limited by charger max current",
     [78]  = "limited by dynamic charger current",
     [79]  = "car not drawing current",
     [80]  = "current ramping",
@@ -768,6 +833,17 @@ local REASON_LABELS = {
     -- problem when the wallbox is fine.
     [100] = "EV not accepting current",
 }
+
+-- Easee's own load balancing can hold the car below FTW's order. In a field
+-- trace (srcfl/ftw#1763, 23 Oct 2026) FTW ordered 15 A and the charger read
+-- back 15 A (observation 48), while the circuit's allocated current (70-72)
+-- and the current signalled to the car (114) fell to 12, 14 and 13 A; the
+-- car took 8.2-8.9 kW instead of 10.4 kW. Easee records a value when it
+-- changes, so a value answers the order when it was recorded at or after
+-- the order, or when the order has stood ORDER_SETTLE_MS since the driver
+-- saw it and the value has not moved.
+local ORDER_SETTLE_MS = 30000
+local order_seen_a, order_seen_ms = nil, 0
 
 local email, password, configured_max_a
 local device_limit_a, device_limit_read_ms
@@ -964,11 +1040,14 @@ function driver_poll()
     local rest_read = false
     if rest_due then
         local problem = err or state_problem(values)
-        rest_next_ms = now + (problem and 10000 or REST_CONFIRM_MS)
+        local unordered = not problem and power_order_problem(values, stamps, now)
+        rest_next_ms = now + ((problem or unordered) and 10000 or REST_CONFIRM_MS)
         if problem then
             host.log("warn", "Easee: observations poll failed: " .. (err and redact_http_err(err) or problem))
             -- The cloud answered that it does not hear the charger.
             if not err then heard_ms = nil end
+        elseif unordered then
+            host.log("warn", "Easee: observations reply not used: " .. unordered)
         else
             -- Without the stream the reply is the whole state, as before.
             if not streaming then latest, latest_at, latest_pushed = {}, {}, {} end
@@ -1093,6 +1172,37 @@ function driver_poll()
         request_active = false
     end
 
+    -- current_limit_a is the current signalled to the car while it is below
+    -- the order the charger holds and answers it. current_limited_by names
+    -- the load balancer only when the circuit's allocation is below the order
+    -- too and no higher than that current, so the allocation explains it.
+    -- ReasonForNoCurrent is not used here: an older reason is not proof.
+    if dyn_current ~= order_seen_a then order_seen_a, order_seen_ms = dyn_current, now end
+    local order_at = source_time_key(timestamps[OBS_DYN_CURRENT])
+    local order_settled = now - order_seen_ms >= ORDER_SETTLE_MS
+    local function answering(id)
+        local value, value_at = obs[id], source_time_key(timestamps[id])
+        if type(value) ~= "number" then return nil end
+        if order_settled or (value_at and order_at and value_at >= order_at) then return value end
+        return nil
+    end
+    local current_limit_a, current_limited_by = nil, nil
+    local pilot_a = answering(OBS_OUTPUT_CURRENT)
+    if charging and type(dyn_current) == "number" and pilot_a and pilot_a > 0 and pilot_a < dyn_current - 0.5 then
+        current_limit_a = pilot_a
+        local low, high, n = nil, nil, 0
+        for id = OBS_ALLOCATED_L1, OBS_ALLOCATED_L1 + 2 do
+            local a = answering(id)
+            if a then low, high, n = math.min(low or a, a), math.max(high or a, a), n + 1 end
+        end
+        -- A three-phase car gets the lowest phase's share. A one-phase car
+        -- uses one phase, which the driver does not know, so the highest.
+        local allocated_a = (phases == 1) and high or (n == 3 and low or nil)
+        if allocated_a and allocated_a < dyn_current - 0.5 and allocated_a <= pilot_a + 0.5 then
+            current_limited_by = "load_balancer"
+        end
+    end
+
     local limit_age_s = device_limit_read_ms and (host.millis() - device_limit_read_ms) / 1000
     host.emit("ev", {
         w                       = power_w,
@@ -1123,6 +1233,8 @@ function driver_poll()
         cable_locked            = cable_locked,
         device_limit_a          = device_limit_a,
         device_limit_age_s      = limit_age_s,
+        current_limit_a         = current_limit_a,             -- A signalled to the car, below the order
+        current_limited_by      = current_limited_by,          -- "load_balancer" or nil
         max_a                   = dyn_current,                 -- last-set dynamic limit (echoes our write, may lag)
         actual_amps_per_phase   = actual_amps_per_phase,       -- live per-phase A derived from totalPower
         phases                  = phases,                      -- our committed phase count (1 or 3)
