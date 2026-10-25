@@ -419,34 +419,47 @@ local function state_problem(obs)
 end
 
 -- REST can answer from an older cache after a newer reply: a late reply once
--- turned a measured 10.242 kW into 0 W (srcfl/device-drivers#183). While a
--- car is connected, a REST reply is not used when its power time goes back
--- from the last one used, gives another value at the same instant, or
--- cannot be read. A disconnect starts the order again, and so do replies
--- that have gone back for UNORDERED_RESET_MS: then the newer time was wrong,
--- for example a stamp from the future, and must not hold the driver silent.
+-- turned a measured 10.242 kW into 0 W (srcfl/device-drivers#183). A REST
+-- reply is not used when its power time goes back from the last one used,
+-- gives another value at the same instant, or, while a car is connected,
+-- cannot be read. Such replies one after another for UNORDERED_RESET_MS
+-- mean the time itself is wrong, for example a stamp from the future or a
+-- format this parser does not know, so the driver uses them rather than go
+-- silent: an older time starts the order again, and unreadable ones are
+-- used as they come until a readable time arrives. A disconnect starts the
+-- order again too. A failed poll ends the run of rejected replies.
 local UNORDERED_RESET_MS = 30000
 local accepted_power_key, accepted_power_value = nil, nil
-local unordered_since_ms = nil
+local unordered_since_ms, unreadable_logged = nil, false
 local function power_order_problem(obs, stamps, now)
-    if obs[OBS_OP_MODE] == 1 then
-        accepted_power_key, accepted_power_value, unordered_since_ms = nil, nil, nil
-        return nil
-    end
-    local key = source_time_key(stamps[OBS_TOTAL_POWER])
-    if not key then return "missing or invalid power source timestamp" end
+    local value, key = obs[OBS_TOTAL_POWER], source_time_key(stamps[OBS_TOTAL_POWER])
+    local disconnected = obs[OBS_OP_MODE] == 1
     local problem = nil
-    if accepted_power_key and key < accepted_power_key then
+    if not key then
+        if not disconnected then problem = "missing or invalid power source timestamp" end
+    elseif accepted_power_key and key < accepted_power_key then
         problem = "out-of-order power observation"
-    elseif key == accepted_power_key and obs[OBS_TOTAL_POWER] ~= accepted_power_value then
+    elseif key == accepted_power_key and value ~= accepted_power_value then
         problem = "conflicting power at one source timestamp"
     end
     if problem then
         unordered_since_ms = unordered_since_ms or now
         if now - unordered_since_ms < UNORDERED_RESET_MS then return problem end
+        if not key then
+            if not unreadable_logged then
+                host.log("warn", "Easee: power times unreadable for 30 s; using replies as they come")
+            end
+            unreadable_logged = true
+            return nil
+        end
         host.log("warn", "Easee: power times went back for 30 s; using the newest reply")
     end
-    accepted_power_key, accepted_power_value, unordered_since_ms = key, obs[OBS_TOTAL_POWER], nil
+    unordered_since_ms, unreadable_logged = nil, false
+    if disconnected then
+        accepted_power_key, accepted_power_value = nil, nil
+    else
+        accepted_power_key, accepted_power_value = key, value
+    end
     return nil
 end
 
@@ -1043,6 +1056,7 @@ function driver_poll()
         local unordered = not problem and power_order_problem(values, stamps, now)
         rest_next_ms = now + ((problem or unordered) and 10000 or REST_CONFIRM_MS)
         if problem then
+            unordered_since_ms = nil
             host.log("warn", "Easee: observations poll failed: " .. (err and redact_http_err(err) or problem))
             -- The cloud answered that it does not hear the charger.
             if not err then heard_ms = nil end
@@ -1075,8 +1089,9 @@ function driver_poll()
     end
     last_blocked = blocked or nil
     if not vouched or blocked then
-        -- An unreadable charger may have changed cars during the gap.
-        invalidate_session_proof()
+        -- An unreadable charger may have changed cars during the gap. A
+        -- reply held back for its order is not a gap.
+        if not unordered_since_ms then invalidate_session_proof() end
         return stream_state == "up" and STREAM_POLL_MS or 10000
     end
     local obs, timestamps = latest, latest_at
@@ -1186,19 +1201,29 @@ function driver_poll()
         if order_settled or (value_at and order_at and value_at >= order_at) then return value end
         return nil
     end
+    -- The charger must hold FTW's last order: while it reads back an older
+    -- one, the pilot may be following the new order. The charger's own
+    -- static limit is device_limit_a, not its load balancing.
     local current_limit_a, current_limited_by = nil, nil
     local pilot_a = answering(OBS_OUTPUT_CURRENT)
-    if charging and type(dyn_current) == "number" and pilot_a and pilot_a > 0 and pilot_a < dyn_current - 0.5 then
+    if charging and type(dyn_current) == "number" and last_amps_set ~= nil and
+       math.abs(last_amps_set - dyn_current) <= 0.5 and
+       pilot_a and pilot_a > 0 and pilot_a < dyn_current - 0.5 then
         current_limit_a = pilot_a
         local low, high, n = nil, nil, 0
         for id = OBS_ALLOCATED_L1, OBS_ALLOCATED_L1 + 2 do
             local a = answering(id)
-            if a then low, high, n = math.min(low or a, a), math.max(high or a, a), n + 1 end
+            if a then
+                n, high = n + 1, math.max(high or a, a)
+                if a > 0 then low = math.min(low or a, a) end
+            end
         end
-        -- A three-phase car gets the lowest phase's share. A one-phase car
-        -- uses one phase, which the driver does not know, so the highest.
+        -- A three-phase car gets the lowest share of the phases it uses; a
+        -- phase with none is not one of them. A one-phase car uses one
+        -- phase, which the driver does not know, so the highest.
         local allocated_a = (phases == 1) and high or (n == 3 and low or nil)
-        if allocated_a and allocated_a < dyn_current - 0.5 and allocated_a <= pilot_a + 0.5 then
+        local own_limit = device_limit_a ~= nil and pilot_a >= device_limit_a - 0.5
+        if allocated_a and allocated_a < dyn_current - 0.5 and allocated_a <= pilot_a + 0.5 and not own_limit then
             current_limited_by = "load_balancer"
         end
     end

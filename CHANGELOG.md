@@ -10,26 +10,32 @@ and the charger reading back 15 A, while Easee's circuit allocation
 (observations 70–72) and the current it signalled to the car (114) fell to
 12, 14 and 13 A. The car took 8.2–8.9 kW instead of 10.4 kW, and FTW said
 "Not following". The driver now reads 70–72 and 114 and emits
-`current_limit_a`, the signalled current, while it is below the order the
-charger holds (48) by more than half an amp and the car charges. A value
-counts only when it answers that order: Easee recorded it at or after the
-order, or the order has stood 30 s and the value has not moved. It emits
-`current_limited_by = "load_balancer"` only when the allocation is below
-the order too and no higher than the signalled current; a three-phase
-charger uses the lowest phase, a one-phase charger the highest.
+`current_limit_a`, the signalled current, while the car charges, the
+charger reads back FTW's last order (48) and the signalled current is
+more than half an amp below it. A value counts only when it answers that
+order: Easee recorded it at or after the order, or the order has stood
+30 s. It emits `current_limited_by = "load_balancer"` only when the
+allocation is below the order too and no higher than the signalled
+current, and the charger's own static limit does not explain it. A
+three-phase charger uses the lowest allocation of the phases in use (a
+phase with none is not in use); a one-phase charger the highest.
 ReasonForNoCurrent is not used as a cause: in that trace reason 77 was
 older than the cuts. Labels for reasons 6, 8–11, 25–30 and 77 now match
 Easee's published table (from srcfl/device-drivers#172).
 
-A REST reply is no longer used when, while a car is connected, its power
-time goes back from the last reply used, it gives another power value at
-the same instant, or its power time is missing or unreadable. A late
-cached reply once turned a measured 10.242 kW into 0 W. Times compare as
-instants across UTC offsets and fractional precision. A disconnect starts
-the order again, and so do replies that have gone back for 30 s, so a
-wrong stamp from the future cannot keep the driver silent. The check and
-its tests come from Segran in srcfl/device-drivers#183. The stream's own
-order is unchanged.
+A REST reply is no longer used when its power time goes back from the
+last reply used or gives another power value at the same instant, or,
+while a car is connected, when its power time is missing or unreadable. A
+late cached reply once turned a measured 10.242 kW into 0 W. Times
+compare as instants across UTC offsets and fractional precision. A
+disconnect starts the order again. Such replies one after another for
+30 s mean the time itself is wrong: an older time then starts the order
+again, and unreadable times are used as they come until a readable one
+arrives, so a stamp from the future or an odd format cannot keep the
+driver silent. A failed poll ends such a run, and a held-back reply does
+not use up one of the ten session checks an hour. The check and its tests
+come from Segran in srcfl/device-drivers#183. The stream's own order is
+unchanged.
 
 Not yet seen against a load-balanced Easee with this code. Core reads the
 new fields from srcfl/ftw#1537.
