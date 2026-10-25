@@ -861,6 +861,12 @@ local REASON_LABELS = {
 -- saw it and the value has not moved.
 local ORDER_SETTLE_MS = 30000
 local order_seen_a, order_seen_ms = nil, 0
+-- When Easee lets the car take the order again, the car needs a few seconds
+-- to draw it and the cloud to report that. Until then the reading still
+-- shows the old limit's draw, so the old limit is kept for up to
+-- LIMIT_RELEASE_HOLD_MS while the car charges below the order.
+local LIMIT_RELEASE_HOLD_MS = 20000
+local last_limit_a, last_limited_by, last_limit_ms = nil, nil, nil
 
 local email, password, configured_max_a
 local device_limit_a, device_limit_read_ms
@@ -1231,6 +1237,12 @@ function driver_poll()
            not own_limit then
             current_limited_by = "load_balancer"
         end
+    end
+    if current_limit_a then
+        last_limit_a, last_limited_by, last_limit_ms = current_limit_a, current_limited_by, now
+    elseif last_limit_ms and now - last_limit_ms < LIMIT_RELEASE_HOLD_MS and charging and
+           type(dyn_current) == "number" and actual_amps_per_phase and actual_amps_per_phase < dyn_current - 1 then
+        current_limit_a, current_limited_by = last_limit_a, last_limited_by
     end
 
     local limit_age_s = device_limit_read_ms and (host.millis() - device_limit_read_ms) / 1000

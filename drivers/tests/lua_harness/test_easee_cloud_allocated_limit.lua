@@ -88,6 +88,20 @@ expect(poll({pilot=14, alloc={14, 14, 14}, pilot_at="00:00:21", kw=9.6, power_at
 expect(poll({pilot=13, alloc={13, 13, 13}, pilot_at="00:00:32", kw=8.85, power_at="00:00:40"}),
     13, "load_balancer", "fall to 13 A")
 
+-- When Easee lets the car take the order again, the cloud reports the
+-- car's old draw for a few seconds; the old limit still applies to it.
+later(5000)
+expect(poll({pilot=15, alloc={15, 15, 15}, pilot_at="00:01:00", kw=8.85, power_at="00:00:40"}),
+    13, "load_balancer", "released, the car not up yet")
+later(15000)
+expect(poll({pilot=15, alloc={15, 15, 15}, pilot_at="00:01:00", kw=8.85, power_at="00:00:40"}),
+    nil, nil, "released 20 s ago")
+boot()
+order(15)
+expect(poll(), 12, "load_balancer", "limited again")
+expect(poll({pilot=15, alloc={15, 15, 15}, pilot_at="00:01:00", kw=10.37, power_at="00:01:05"}),
+    nil, nil, "released, the car at the order")
+
 -- 2. Below the order, but nothing says why: the current is reported, the
 -- cause is not. An allocation above the pilot does not explain it, and an
 -- old ReasonForNoCurrent is not proof either.

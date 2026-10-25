@@ -18,7 +18,10 @@ order: Easee recorded it at or after the order, or the order has stood
 allocation is below the order too and no higher than the signalled
 current, and the charger's own static limit does not explain it. A
 three-phase charger uses the lowest allocation of the phases in use (a
-phase with none is not in use); a one-phase charger the highest.
+phase with none is not in use); a one-phase charger the highest. When
+Easee lets the car take the order again, the last limit stays for up to
+20 s while the car still draws below the order, since the cloud reports
+the car's new draw a few seconds later.
 ReasonForNoCurrent is not used as a cause: in that trace reason 77 was
 older than the cuts. Labels for reasons 6, 8–11, 25–30 and 77 now match
 Easee's published table (from srcfl/device-drivers#172).
