@@ -69,6 +69,15 @@ later(5000); n = poll(9.1,"2026-10-17T03:49:25")
 assert(n==count+2,"replies stopped again while the time stays unreadable")
 later(5000); n = poll(9.0,"2026-10-17T03:49:30Z")
 assert(n==count+3,"a readable time after them was not used")
+-- Now and then a failed poll among them does not hold the driver silent.
+fresh()
+count = poll(10.242,"2026-10-17T03:49:08Z")
+for i=1,12 do
+ later(5000)
+ if i % 4 == 0 then host._http_responses["/observations?ids="] = nil; driver_poll()
+ else n = poll(10.242,"2026-10-17T03:49:20") end
+end
+assert(n>count,"failed polls among unreadable replies kept the driver silent")
 
 -- A late "disconnected" reply is held to the same order.
 fresh()

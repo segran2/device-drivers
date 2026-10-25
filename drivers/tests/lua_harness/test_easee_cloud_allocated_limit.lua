@@ -76,7 +76,9 @@ end
 
 -- 1. The field trace: allocation and pilot below the 15 A order and newer
 -- than it. The allocation explains the pilot, so the load balancer is named.
+-- Before FTW's first order after a restart there is no order to be below.
 boot()
+expect(poll(), nil, nil, "no order from FTW yet")
 order(15)
 expect(poll(), 12, "load_balancer", "start at 12 A")
 expect(poll({pilot=15, alloc={15, 15, 15}, pilot_at="23:55:14", kw=10.37, power_at="23:55:30"}),
@@ -110,6 +112,7 @@ boot({phases=1})
 order(15, "1p")
 expect(poll({pilot=12, alloc={12, 0, 0}}), 12, "load_balancer", "one phase")
 expect(poll({pilot=12, alloc={12, 16, 16}}), 12, nil, "one phase, the charger's phase unknown")
+expect(poll({pilot=12, alloc={0, 0, 0}}), 12, nil, "one phase, no allocation")
 
 -- 4. At or near the order, not charging, or no positive pilot: no limit.
 boot()

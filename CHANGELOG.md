@@ -32,8 +32,9 @@ disconnect starts the order again. Such replies one after another for
 30 s mean the time itself is wrong: an older time then starts the order
 again, and unreadable times are used as they come until a readable one
 arrives, so a stamp from the future or an odd format cannot keep the
-driver silent. A failed poll ends such a run, and a held-back reply does
-not use up one of the ten session checks an hour. The check and its tests
+driver silent. A gap of more than 30 s between such replies, such as an
+outage, starts the count again, and a held-back reply does not use up one
+of the ten session checks an hour. The check and its tests
 come from Segran in srcfl/device-drivers#183. The stream's own order is
 unchanged.
 

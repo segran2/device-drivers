@@ -427,10 +427,11 @@ end
 -- format this parser does not know, so the driver uses them rather than go
 -- silent: an older time starts the order again, and unreadable ones are
 -- used as they come until a readable time arrives. A disconnect starts the
--- order again too. A failed poll ends the run of rejected replies.
+-- order again too. A run of rejected replies ends after a gap of more than
+-- UNORDERED_RESET_MS between them, such as an outage.
 local UNORDERED_RESET_MS = 30000
 local accepted_power_key, accepted_power_value = nil, nil
-local unordered_since_ms, unreadable_logged = nil, false
+local unordered_since_ms, unordered_last_ms, unreadable_logged = nil, nil, false
 local function power_order_problem(obs, stamps, now)
     local value, key = obs[OBS_TOTAL_POWER], source_time_key(stamps[OBS_TOTAL_POWER])
     local disconnected = obs[OBS_OP_MODE] == 1
@@ -443,7 +444,10 @@ local function power_order_problem(obs, stamps, now)
         problem = "conflicting power at one source timestamp"
     end
     if problem then
-        unordered_since_ms = unordered_since_ms or now
+        if not unordered_since_ms or now - unordered_last_ms > UNORDERED_RESET_MS then
+            unordered_since_ms = now
+        end
+        unordered_last_ms = now
         if now - unordered_since_ms < UNORDERED_RESET_MS then return problem end
         if not key then
             if not unreadable_logged then
@@ -1050,17 +1054,17 @@ function driver_poll()
     local values, err, stamps
     if rest_due then values, err, stamps = get_observations(charger_serial) end
     local now = host.millis()
-    local rest_read = false
+    local rest_read, held_back = false, false
     if rest_due then
         local problem = err or state_problem(values)
         local unordered = not problem and power_order_problem(values, stamps, now)
         rest_next_ms = now + ((problem or unordered) and 10000 or REST_CONFIRM_MS)
         if problem then
-            unordered_since_ms = nil
             host.log("warn", "Easee: observations poll failed: " .. (err and redact_http_err(err) or problem))
             -- The cloud answered that it does not hear the charger.
             if not err then heard_ms = nil end
         elseif unordered then
+            held_back = true
             host.log("warn", "Easee: observations reply not used: " .. unordered)
         else
             -- Without the stream the reply is the whole state, as before.
@@ -1091,7 +1095,7 @@ function driver_poll()
     if not vouched or blocked then
         -- An unreadable charger may have changed cars during the gap. A
         -- reply held back for its order is not a gap.
-        if not unordered_since_ms then invalidate_session_proof() end
+        if not held_back then invalidate_session_proof() end
         return stream_state == "up" and STREAM_POLL_MS or 10000
     end
     local obs, timestamps = latest, latest_at
@@ -1223,7 +1227,8 @@ function driver_poll()
         -- phase, which the driver does not know, so the highest.
         local allocated_a = (phases == 1) and high or (n == 3 and low or nil)
         local own_limit = device_limit_a ~= nil and pilot_a >= device_limit_a - 0.5
-        if allocated_a and allocated_a < dyn_current - 0.5 and allocated_a <= pilot_a + 0.5 and not own_limit then
+        if allocated_a and allocated_a > 0 and allocated_a < dyn_current - 0.5 and allocated_a <= pilot_a + 0.5 and
+           not own_limit then
             current_limited_by = "load_balancer"
         end
     end
