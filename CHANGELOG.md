@@ -1,15 +1,205 @@
 # Changelog
 
-## myuplink 1.2.4
+## [Unreleased]
+
+### myuplink 1.3.0
 
 Improve NIBE F750 telemetry from hardware-observed MyUplink parameter data.
 Parameter 40013 is documented as BT7 hot-water top temperature, and parameter
 40940 is exposed as the canonical hp_degree_minutes reading. Ignore the NIBE
 -32768 unavailable-value sentinel instead of emitting bogus telemetry, and
-remove embedded Unicode soft hyphens from generated metric names. The driver
-remains read-only. No F750 electrical compressor-power mapping is claimed.
-Unavailable canonical temperature points are omitted instead of being reported as 0 °C.
+remove embedded Unicode soft hyphens from generated metric names. Unavailable
+canonical temperature points are omitted instead of being reported as 0 °C.
+The driver remains read-only. No F750 electrical compressor-power mapping is
+claimed. Preserve 1.2.4's failed-read retry and rotated-token persistence.
 
+### easee_cloud 1.4.0
+
+Read Easee's SignalR stream when the host grants a WebSocket. Easee
+recommends the stream for readings and REST for commands (support reply,
+24 October 2026); REST polling every 5 s costs about 720 requests an hour
+per charger. The driver opens a WebSocket to
+`streams.easee.com/hubs/products`, subscribes with
+`SubscribeWithCurrentState` and reads `ProductUpdate` messages into the
+same observations REST fills. Pushed changes reach Core on the next 2 s
+poll. It skips SignalR's negotiate step: Easee's hub sits behind a load
+balancer that pins a client to a server with a cookie, which the host does
+not share between its HTTP and WebSocket clients. Connecting is then one
+dial, which Core bounds.
+
+While the stream is up, REST reads once a minute. The driver reports only
+what a REST read in the last 90 s vouches for, since the stream cannot say
+that the cloud lost the charger. When REST shows a state, power or energy
+change the stream has not pushed, the stream has 10 s to deliver it;
+otherwise the driver drops the stream. A stream that closes, goes silent for a minute or fails to
+subscribe also drops back to REST every 5 s and reconnects with back-off
+from 5 s to 5 min; a renewed access token reconnects at once. A REST reply
+older than a pushed value does not replace it, and the current state the
+stream replays on subscribe does not replace a newer REST read. Once
+subscribed, the stream's order wins. A pushed reading without an
+RFC 3339 UTC time is skipped, and so is a state, power or energy reading
+that is not a number; the stream then owes the state, power or energy. The
+check that hides an older ReasonForNoCurrent while the car charges now
+compares times instead of their spelling.
+
+`power_max_age_s` and the confirmation fields are unchanged; commands still
+use REST. Without the stream each REST reply is the whole state, as in
+1.3.8. The driver declares `ws_hosts = { "streams.easee.com" }`. A Core
+that reads it (srcfl/ftw#1822) grants the WebSocket from that, because an
+Easee config already grants HTTP, and gives up a dial after 5 s. An older
+Core grants it only when the driver config has a `capabilities.websocket`
+entry listing `streams.easee.com`, and its dial can take 15 s; without one
+the driver polls REST as before. The signed channel's copy now carries
+`ws_hosts` in its generated header, so an owner who picks 1.4.0 from the
+beta channel on such a Core streams too; no other driver's signed bytes
+change. Tested in the Lua harness with a fake WebSocket host; not yet run
+against Easee's servers or on hardware.
+
+### myuplink 1.2.4
+
+One slow request no longer marks the heat pump offline. Core marks a driver
+offline after 60 s without a reading, and a host HTTP request may take 15 s
+before it times out. After a failed read the driver waited 30 s, so one
+timed-out request left 75 s without a reading. On one home box from 22 to 25
+October 2026 that happened 124 times; in 109 of them the next read worked.
+The driver now retries a failed read or sign-in once after 2 s, which keeps
+that gap near 47 s. A second failure in a row waits the full 30 s, so an
+outage of a minute or more still shows as offline, and the driver stays far
+below myUplink's limit of 25 requests a minute. A good read now asks for
+30 s, the wait Core already used: Core holds a returned wait to 30 s at most.
+A failed read still emits nothing.
+
+A rotated `refresh_token` that the host could not store is now stored on the
+next poll. Before, a failed store (SQLite busy, seen once on 25 October) left
+the new token only in memory until the next rotation, about an hour later. A
+reload or restart in that hour started from the old token; if myUplink no
+longer accepts it, the driver cannot sign in until the owner connects again.
+The store comes after the poll's reading, so a slow store does not hold the
+reading back. The driver warns once, and logs when the store succeeds. It
+does not store the token in `driver_cleanup`, where a reconnect may just have
+stored a newer one. Tested in the Lua harness and against FTW's Go host with a read that
+stalls past the 15 s timeout; not yet run on the box.
+
+### easee_cloud 1.3.8
+
+Two fixes to the 7 A start from 1.3.7, from its review. A reloaded driver
+no longer offers 7 A before its first poll: the car may already charge at
+6 A, so the driver now waits until a poll has seen the charger not charging.
+A pause or the stand-down that clears a boost now also drops the boost's 7 A
+from the current the driver re-writes after a phase change: a pause keeps
+the 6 A order and the stand-down 0 A. Before, the next poll could write 7 A
+again without the cap or the 90 s window. A pause keeps 6 A rather than
+0 A because Core's contactor cycle sends a resume after a pause with no new
+order between. Tested in the Lua harness; not yet on hardware.
+
+### easee_cloud 1.3.7
+
+Start a 6 A order at 7 A. On an Easee Home with an Audi e-tron (three
+phases), a resume at 6 A gave a positive pilot only 5 min 2 s to 5 min 47 s
+later in four runs on 22 October 2026, also with a single resume; 7 A and
+then 6 A started at once. evcc reports the same delay at 6 A. The driver now
+offers 7 A per phase when a stopped charger gets a 6 A order, and only when
+7 A fits: Core's `cap_amps_per_phase` for this charger, the order's
+`max_amps_per_phase` and the charger's static limit, as read from its
+config, must all allow 7 A. `max_amps_per_phase` is the fuse rating, not the
+room left, so a 6 A order on a phase with room for 6.4 A would otherwise draw
+7 A and Core would stop the car. A Core that does not send
+`cap_amps_per_phase` (srcfl/ftw#1809) gets no boost. Every order during a
+boost checks this again, and one that no longer fits writes 6 A at once. The
+driver writes 6 A as soon as the charger reports charging, or after 90 s,
+also when observations fail. One boost per start; a running session lowered
+to 6 A is not raised, orders above 6 A are unchanged, and no extra resume is
+sent. `start_boost: false` turns it off. Tested in the Lua harness; not yet
+on hardware with this driver.
+
+### home_assistant_vehicle 0.1.0
+
+A new read-only driver for a car whose level Home Assistant already reads. A
+Home Assistant automation publishes one JSON message over MQTT; the driver
+subscribes, emits every 5 seconds and holds no Home Assistant token. It
+reads the level, charge limit and charging state, and, when the automation
+maps them, the charge cable (`plugged`) and the car's place (`at_site` from
+a tracker in zone home). The automation may add `plugged_since` from
+`last_changed`, but only when the integration reads the cable at least
+every 30 seconds: `last_changed` is when Home Assistant read the change.
+The header carries the automation for the Tesla Custom Integration.
+Messages from a Model Y on that integration, recorded on 15 October 2026,
+are the test fixtures.
+
+### tesla_cloud 0.2.0
+
+Report the charge cable (`plugged`, from `conn_charge_cable`, else the
+charging state). No cable time: the driver reads the car minutes apart. With
+a site position from FTW and the optional `vehicle_location` scope, the same
+`vehicle_data` read asks for `location_data`, and the driver emits the car's
+distance from the site (`site_distance_m`), never its coordinates. A token
+without the scope gets HTTP 403 for that read; the driver then reads
+`charge_state` alone and asks again a day later. No request is added and no
+car is woken. A level of 1 % goes as 0.01.
+
+### teslamate_vehicle 0.2.0
+
+Report the charge cable from TeslaMate's `plugged_in`. A change is dated
+(`plugged_since_ms`, by the box's clock) only when a live update carries it:
+a `healthy` message within 10 seconds. A retained value, at subscribe or
+redelivered after the broker reconnects, has no known time. With `geofence`
+set to this site's TeslaMate geofence, the geofence topic gives `at_site`;
+otherwise `latitude` and `longitude` give the distance from the site. The
+coordinates are not emitted. A level of 1 % goes as 0.01.
+
+### vag_vehicle 0.3.0
+
+Report the charge cable from the Data Act dataset's plug state. No cable
+time: the portal writes every 15 minutes. A plug state other than connected
+or disconnected is unknown, not unplugged. The datasets carry no position.
+A level of 1 % goes as 0.01.
+
+### tesla_vehicle 0.2.6
+
+A level of 1 % goes as 0.01. FTW reads a vehicle `soc` of 1 as 100 %, so a
+car at 1 % looked full.
+
+### pixii_pv 0.3.3
+
+Report zero PV generation when the measured phase sum is negative. Negating
+that sum used to emit positive PV power, which FTW rejects, so fresh readings
+could leave PV stale or missing after sunset. Sum the phases before limiting
+generation to zero; keep their signed diagnostic values. Missing, invalid or
+non-finite phase power emits no PV reading. Idle polls do not refresh PV.
+
+## pixii 2.1.9
+
+A power cut left the driver offline until someone restarted it. Each register
+keeps its own failure count and stops being read after three misses. When the
+Pixii boots slower than FTW, every read fails for about fifteen seconds,
+three polls at five seconds, and every register is retired. The device then
+answers and the driver never asks again.
+
+Misses count on a poll where some other register answered. A poll where every
+read fails leaves the counts unchanged: the device is unreachable. The next
+poll that gets an answer clears the counts. Register 40288 on PowerShaper
+firmware below CPU 2.0.23 still stops after three misses while the device is
+answering other registers, and is tried again every five minutes.
+
+FTW's bundled copy does not move with this commit. Bump the pin and run
+`scripts/sync-bundled-drivers.sh` (srcfl/ftw#1620).
+
+## sungrow 1.6.0
+
+Read the live values once a second. `driver_poll` returns 1000 ms. Each poll
+reads grid, PV and battery power, SoC, per-phase values and the EMS readback.
+Energy counters, rated power, temperature, frequency and fault bits keep the
+five-second rate. Between those reads each blob carries their last values, but
+only when its own power read succeeded this poll. FTW stores each emit whole,
+and its energy ledger starts over whenever a counter drops out.
+
+A host that ignores the returned interval still polls every five seconds, and
+then every poll reads everything, as before. FTW honours the return from
+srcfl/ftw#1616.
+
+A read FTW refused while it waited to reconnect no longer counts toward
+treating a register as absent. At one poll per second, a two-second wait would
+otherwise mark a whole block absent after one dropped packet.
 
 ## Tests: no invented numbers
 
