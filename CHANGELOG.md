@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### easee_cloud 1.4.3
+
+Report the current Easee signals below FTW's order. Attribute the limit to
+load balancing when the circuit allocation supports it. Require a usable
+allocation on all three phases when the active phase of a one-phase car is
+unknown. Keep the observation ordering from #183 and the coarse session energy counter declaration.
+
+
 ### easee_cloud 1.4.2
 
 REST and SignalR compare TotalPower source times on the same UTC timeline.
