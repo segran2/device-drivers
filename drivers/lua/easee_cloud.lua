@@ -1228,7 +1228,14 @@ function driver_poll()
         local confirmed = observation_confirmed_ms[id]
         if not confirmed or now - confirmed > REST_FRESH_MS then return nil end
         local wall = host.unix_ms and host.unix_ms() or nil
-        if wall and tonumber(value_at) * 1000 > wall then return nil end
+        if wall then
+            -- Compare in the same day/second format as source_time_key.
+            local seconds = math.floor(wall / 1000)
+            local fraction = string.format("%03d", math.floor(wall % 1000)):gsub("0+$", "")
+            local wall_key = string.format("%07d%05d", math.floor(seconds / 86400), seconds % 86400)
+                .. "." .. fraction
+            if value_at > wall_key then return nil end
+        end
         return value, value_at
     end
     local function answering(id)
