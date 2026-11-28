@@ -1092,7 +1092,7 @@ def render_html(catalog: dict) -> str:
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Device driver catalog | Sourceful &amp; FTW">
 <meta name="twitter:description" content="{totals['drivers']} open Lua drivers, with the tested models and support evidence behind each one.">
-<link rel="icon" href="https://ftw.sourceful.energy/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="https://ftw.energy/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://api.fontshare.com">
 <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700,900&amp;display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&amp;display=swap">
@@ -1111,7 +1111,7 @@ def render_html(catalog: dict) -> str:
       <a href="#catalog">Catalog</a>
       <a href="{REPO_URL}/blob/main/docs/WRITING-A-DRIVER.md">Write a driver</a>
       <a href="{REPO_URL}/blob/main/SUPPORT_STATUS.md">Support status</a>
-      <a href="https://ftw.sourceful.energy/">FTW</a>
+      <a href="https://ftw.energy/">FTW</a>
       <a class="nav-cta" href="{REPO_URL}">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </div>
@@ -1205,7 +1205,7 @@ def render_html(catalog: dict) -> str:
       </div>
       <div>
         <span>Hosts</span>
-        <a href="https://ftw.sourceful.energy/">FTW</a>
+        <a href="https://ftw.energy/">FTW</a>
         <a href="https://github.com/srcfl/ftw">srcfl/ftw</a>
         <a href="https://www.sourceful.energy/">Sourceful Energy</a>
       </div>

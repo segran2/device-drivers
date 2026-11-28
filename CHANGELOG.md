@@ -12,6 +12,210 @@
 - Prefer valid timestamps over missing or invalid ones. Equal or unavailable
   timestamps retain the existing dataset-order fallback.
 
+### New DRIVER field: `setup_hint`
+
+A new owner adds an inverter, FTW cannot reach it, and nothing says that
+Modbus TCP is off in the inverter. A driver may now say
+what to switch on, in one sentence of the device's own menu words, as
+`setup_hint` in its `DRIVER` table. FTW can show it on the device card and
+when a connection test fails.
+
+`make check` holds the field to what FTW Core can read: one double-quoted
+string on one line, no double quote or backslash inside, one sentence ending
+with a full stop, at most 140 characters. The signed channel copies it into
+the header Core reads, as it does `ws_hosts`. A driver without a hint keeps
+its published bytes. FTW Core ignores the field until it learns to read it.
+See `spec/manifest-v2.md`.
+
+### sungrow 1.7.1, huawei 2.2.1, fronius 2.3.1, sma 2.2.1, sma_pv 1.1.2, kostal 2.2.1, goodwe 2.3.1, solis 2.2.1, victron 2.2.2
+
+Each inverter driver now carries a `setup_hint`, taken from the vendor's own
+document:
+
+- sungrow: the WiNet-S manual says port 502 for Modbus TCP is closed by
+  default.
+- huawei: Huawei's dongle guide sets Modbus TCP on the SDongle to "Enable
+  (unrestricted)" in FusionSolar, with an installer account.
+- fronius: Communication > Modbus, TCP server, port 502 or 1502 (Fronius
+  GEN24 Modbus TCP & RTU manual).
+- sma, sma_pv: Modbus TCP is off by default. An Installer turns it on under
+  Device Parameters > External Communication > Modbus > TCP Server (SMA
+  Modbus technical information).
+- kostal: Settings > Modbus/SunSpec (TCP) > Activate Modbus, port 1502.
+- goodwe: Modbus TCP needs a LAN module or a WiFi/LAN Kit-20 on a cable.
+- solis: Modbus TCP needs an S2-WL-ST Wi-Fi/LAN logger, on port 502.
+- victron: Settings > Integrations > Modbus TCP Server, or Settings >
+  Services on older Venus OS.
+
+No register or reading changed.
+
+### goe 1.1.1, goe_http 1.1.1, keba 1.1.1, alfen 1.1.2, abb_terra 1.1.2, mennekes 1.1.2, etrel 1.1.1, ctek 0.3.4, ctek_v2 0.3.4, ctek_hybrid 0.3.3
+
+Each charger driver now carries a `setup_hint`: Modbus or HTTP API v2 in
+the go-e app, DIP switch DSW1.3 on the KEBA, Active Load Balancing in Alfen's
+ACE Service Installer, Load Balance in ABB's TerraConfig app, Modbus TCP
+Server on a Mennekes ECU, Modbus in the Etrel web interface, and
+Automation > ModbusTCPEnable on a CTEK Chargestorm. The go-e, KEBA, Alfen,
+ABB and Mennekes words come from the vendors' documents; the Etrel and CTEK
+words come from the drivers' own notes. No register or command changed.
+
+### nibe_local 1.2.2
+
+`setup_hint`: menu 7.5.15 Local REST API on the heat pump, from NIBE's
+installer manual. Nothing else changed.
+
+### zap 3.2.1, remne_p1ib 0.1.1, esphome_dsmr 1.0.8
+
+`setup_hint`: ask the grid company to open the meter's HAN/P1 port if it is
+closed. Ellevio in Sweden and Fluvius in Belgium keep the port closed until
+the customer asks. Nothing else changed.
+
+### sonnen 2.0.4
+
+Battery power has the site sign. sonnen reports `Pac_total_W` positive while
+discharging and negative while charging; the driver passed it through, so
+FTW showed every charge as a discharge and the reverse. It now negates the
+value: charging is positive. On a sonnenBatterie with software 1.40.5 on
+2026-11-13, in manual mode, a 500 W charge setpoint read back over six reads
+as `Pac_total_W` -495 to -504 W, `SetPoint_W` -500 and `BatteryCharging`
+true. `battery_pac_w` keeps the vendor's own sign. The driver stays
+read-only. Verified on one unit and one firmware (1.40.5); other firmware
+versions are unverified.
+
+### tibber 1.1.3
+
+A box set up from the UI could not open Tibber's live stream. After the
+owner entered an API key, the driver logged `Tibber WS dial failed: ws:
+capability not granted` and never read the meter (27 November 2026). Since
+srcfl/ftw#1822, Core grants a driver's WebSocket only from `ws_hosts` in its
+`DRIVER` table, for a config that grants HTTP, or from a
+`capabilities.websocket` entry in the config. The UI writes no such entry,
+and the driver declared no `ws_hosts`. It now declares
+`ws_hosts = { "websocket-api.tibber.com" }`, so the HTTP grant the UI already
+writes is enough, and the signed channel's copy carries it in its header. A
+Core older than srcfl/ftw#1822 still needs the `capabilities.websocket`
+entry. A new test fails any driver that opens a WebSocket to a host its
+`ws_hosts` leaves out. Checked by the driver and channel tests; not yet run
+against Tibber's servers.
+
+### pixii 2.2.0
+
+A Pixii can stop charging below 100 %. On one site its SoC held at 90 while
+Core kept planning and ordering charge to 95 %, and the Pixii app showed
+100 % (#175). The driver now reads the upper SoC limits Pixii documents on the
+same scale as its SoC, SoCMax (40128) and SoCRsvMax (40130), and reports the
+lower as `max_soc_fract`. A limit below 50 % is taken as a misread and left
+out. Core plans and dispatches to it (srcfl/ftw#2083). The SoC is still
+reported as read: Pixii does not document how its app maps it to 100 %. The
+lower limits and the gross SoC with its safety limits (39915-39917, on a scale
+Pixii does not relate to the SoC) go to history only, so a field check can
+show which limit holds. An unimplemented SunSpec scale factor (0x8000) now
+reads as no scaling instead of scaling every value to zero.
+
+### pixii 2.1.10
+
+Recognize battery calibration from Pixii's running-service register when
+the SunSpec charge status is unsupported. Keep measurements live and
+suspend FTW dispatch until calibration ends.
+
+### teslamate_vehicle 0.2.2
+
+TeslaMate's MQTT page now marks the `latitude` and `longitude` topics
+deprecated in favour of `location`, a JSON object with `latitude` and
+`longitude` (#278). Without a geofence, the driver uses the car's position
+to work out how far it is from the site. It now reads `location` with
+`host.json_decode` and still reads the old topics, so older TeslaMate
+versions keep working. The newest message sets the position. A `location`
+that is not JSON, lacks a key, or holds a value that is not a finite
+number in range leaves the last position as it was, so a bad message never
+moves the car or puts it at 0,0. The position still does not make the
+charge level fresh, and the coordinates still stay in the driver.
+
+### zaptec_cloud 0.3.0
+
+First field test (Zaptec Go, 20 A main fuse, two one-phase cars) found
+three faults that kept the car from charging:
+
+- A one-phase order on an idle three-phase charger was divided over three
+  phases, so anything up to 18 A came out below 6 A and was written as 0 A.
+  When Core asks for one phase, the charger draws on none and its state is
+  fresh, the driver now offers the charger's minimum, as a resume does. Once
+  the car draws on one phase it gets its full one-phase current. A car seen
+  on three phases never gets this start.
+- The driver wrote 0 A on every stop and left it on the charger. The owner
+  found "Max Current lower than Min Current" in the Zaptec portal, and
+  neither the Zaptec app nor another load balancer could start the charger.
+  The new `driver_release` puts back the maximum found before FTW's first
+  write, or 32 A when that is unknown, and resumes a charger FTW paused.
+  Core calls it when the owner removes or disables the driver
+  (srcfl/ftw, paired PR); a restart still stands down at 0 A.
+- Zaptec Cloud calls took longer than the host's 5 s. The driver asks for
+  20 s per call with `host.set_command_timeout_s` and retries a request once
+  after a server error or a lost connection.
+
+The driver also reads the charger's own minimum (observation 511) and never
+writes a positive current below it.
+
+### easee_cloud 1.5.0
+
+Expose the actual pilot current and its source/change timestamp separately
+from the dynamic current setting. Record a fresh confirmation only when
+that observation is accepted from REST or SignalR; a poll of other values
+does not refresh the pilot. Reject unusable, future or expired pilot and
+allocation evidence before it can explain a charging shortfall. Unchanged
+pilot values may retain an old source timestamp when freshly confirmed.
+Paired Core feedback changes distinguish a proven load-balancing limit
+from an otherwise unexplained pilot limit (srcfl/ftw#1874).
+
+### easee_cloud 1.4.5
+
+Report when Easee's load balancing holds a start. While the car draws nothing
+and the charger holds an order a car can start on, the driver reports
+`current_limit_a` as the allocated current and `current_limited_by =
+"load_balancer"` when that current is below 6 A. Evidence is the circuit
+allocation on all three phases, or else a ReasonForNoCurrent that names the
+Equalizer (10 or 28) in the charger's current state. Reason 78 is not
+evidence: FTW writes that setting too. Easee support says the Equalizer
+raises the current again up to 15 minutes after household use falls
+(srcfl/ftw#1948); FTW Core waits that long before it reports a failed start.
+A reason or charger state without a readable source time is not evidence.
+
+### easee_cloud 1.4.4
+
+Report the current Easee signals below FTW's order (observation 114, the
+pilot), and attribute the limit to load balancing when the circuit
+allocation (observations 70-72) supports it. Require a usable allocation on
+all three phases when the active phase of a one-phase car is unknown.
+ReasonForNoCurrent labels now follow Easee's enumeration table
+(developer.easee.com/docs/enumerations). Power ordering is the one from
+1.4.2 (#183).
+
+### easee_cloud 1.4.3
+
+The driver re-sends its current limit as a charger command. Easee puts the
+limit back at its maximum when charging resumes (32 A reported, #225). The
+settings write reaches the charger only when the cloud's stored value
+changes, so re-sending the same order never undid that. On a 16 A fuse a
+7 A order drew 16 A for about 10 s.
+
+- 3 s after a resume or start, and after a phaseMode write, the order goes
+  out as `set_dynamic_charger_current` with `minutes: 0`.
+- When the charger reports a higher limit than ordered, or draws more than
+  2 A over the order, the order is re-sent as a command, at most every 10 s.
+- `minutes: 0` holds the limit until the next one, as Easee documents. A 0 A
+  order goes out as a 0 A command too, the limit a pause sets.
+- A failed re-send is retried every 10 s, not on every poll.
+- When a lower order's settings write fails, re-sends use that lower order,
+  not the earlier, higher one.
+
+### easee_cloud 1.4.2
+
+REST and SignalR compare TotalPower source times on the same UTC timeline.
+Older readings and conflicting values at one instant cannot replace newer
+power. A disconnect clears the power watermark. If the source clock moves
+back, advancing readings on the lower timeline can restore telemetry after
+30 seconds.
+
 ### victron_mqtt 1.2.1
 
 The manifest declares `R/+/keepalive` in `mqtt_read_request_topics`, so the

@@ -29,7 +29,7 @@ DRIVER = {
   id           = "pixii",
   name         = "Pixii PowerShaper",
   manufacturer = "Pixii",
-  version      = "2.1.9",
+  version      = "2.2.0",
   protocols    = { "modbus" },
   capabilities = { "battery", "meter" },
   description  = "Pixii PowerShaper commercial battery storage via Modbus TCP.",
@@ -61,6 +61,7 @@ local REG_SETPOINT_LO = 39906  -- int32 LSB
 -- SunSpec model 802 battery status points. Pixii's SoC is already read
 -- from this block at 40132, so these adjacent points are cheap diagnostics.
 local REG_BATTERY_SOC = 40132
+local REG_PIXII_RUNNING_SERVICE = 40108 -- StVnd: 116 is battery SoC calibration
 local REG_BATTERY_CHARGE_STATUS = 40137 -- ChaSt: OFF/EMPTY/DISCHARGING/...
 local REG_BATTERY_CONTROL_MODE = 40138 -- LocRemCtl: REMOTE/LOCAL
 local REG_BATTERY_STATE = 40143 -- State: CONNECTED/STANDBY/FAULT/...
@@ -223,10 +224,11 @@ end
 
 -- Read a single i16-typed scale factor register. SF=0 (x1 scaling) is the
 -- right fallback when the register is absent, and matches units where it
--- exists but reads zero.
+-- exists but reads zero. SunSpec marks an unimplemented scale factor 0x8000;
+-- read as -32768 it would scale every value to zero.
 local function read_sf(addr)
     local regs = probe_read(addr, 1, "holding")
-    if regs then return host.decode_i16(regs[1]) end
+    if regs and regs[1] ~= 0x8000 then return host.decode_i16(regs[1]) end
     return 0
 end
 
@@ -307,6 +309,12 @@ local last_charge_label = nil
 
 local function read_battery_status()
     local charge_status = read_status_u16(REG_BATTERY_CHARGE_STATUS)
+    local running_service = read_status_u16(REG_PIXII_RUNNING_SERVICE)
+    -- Pixii PowerShaper Modbus Mapping, Table 23 (StVnd service types).
+    -- https://www.pixii.com/wp-content/uploads/2026/06/U8022_06ENG_2v20_Configuration_Guide_Pixii_Powershaper_Modbus_Mapping.pdf#page=41
+    local service_known = running_service ~= nil and running_service >= 101 and running_service <= 129
+    local calibrating = charge_status == 7 or running_service == 116
+    if running_service ~= nil then host.emit_metric("pixii_running_service_code", running_service) end
     local control_mode = read_status_u16(REG_BATTERY_CONTROL_MODE)
     local battery_state = read_status_u16(REG_BATTERY_STATE)
     local vendor_state = read_status_u16(REG_BATTERY_STATE_VENDOR)
@@ -320,36 +328,35 @@ local function read_battery_status()
 
     local charge_label = label_for(charge_status_labels, charge_status)
     local charge_status_known = charge_status ~= nil and charge_status_labels[charge_status] ~= nil
-    if not charge_status_known and charge_label ~= last_charge_label then
+    if not charge_status_known and not service_known and charge_label ~= last_charge_label then
         host.log("warn", "Pixii: charge status " .. charge_label
-            .. "; calibration state is unknown; retaining any previous calibration fault")
+            .. "; calibration state is unknown; retaining any previous calibration state")
     end
     last_charge_label = charge_label
     local control_label = label_for(control_mode_labels, control_mode)
     local state_label = label_for(battery_state_labels, battery_state)
-    local key = charge_label .. "/" .. control_label .. "/" .. state_label .. "/" .. tostring(vendor_state) .. "/" .. tostring(event1)
+    local key = charge_label .. "/" .. control_label .. "/" .. state_label .. "/" .. tostring(vendor_state) .. "/" .. tostring(event1) .. "/" .. tostring(running_service)
     if key ~= last_status_key then
         host.log("info", "Pixii: status charge=" .. charge_label
             .. " control=" .. control_label
             .. " state=" .. state_label
             .. " vendor_state=" .. tostring(vendor_state)
             .. " event1=" .. tostring(event1))
-        if charge_status == 7 then
-            host.log("warn", "Pixii: charge status is TESTING; excluding from dispatch until calibration finishes")
+        if calibrating then
+            host.log("info", "Pixii: battery calibration detected; excluding from dispatch until calibration finishes")
         end
         last_status_key = key
     end
 
-    -- SunSpec 802 ChaSt=testing (7): Pixii is calibrating and ignores
-    -- external setpoints. Flag a device fault so dispatch + MPC exclude it
-    -- while keeping telemetry and site-meter data live. Only a recognized
-    -- status can clear it: absent, unsupported or unknown values do not
-    -- prove calibration has finished. Unknown status at startup is not
-    -- evidence of calibration either, so it does not invent a fault.
-    if charge_status_known then
-        local calibrating = charge_status == 7
-        host.set_device_fault(calibrating,
-            calibrating and "Pixii battery calibrating/testing (SunSpec ChaSt=testing)" or "")
+    -- StVnd can report calibration when the SunSpec charge status is
+    -- unsupported. Keep the last verdict if both reads are unknown.
+    if charge_status_known or service_known then
+        if host.set_calibrating then
+            host.set_calibrating(calibrating)
+        else
+            -- Older Core versions use the fault gate to suspend dispatch.
+            host.set_device_fault(calibrating, calibrating and "Pixii battery is calibrating" or "")
+        end
     end
 
     return {
@@ -378,6 +385,93 @@ local function emit_troubleshooting_metrics(setpoint_pixii_w)
             host.emit_metric("pixii_last_command_age_s", (host.millis() - last_command_ms) / 1000)
         end
     end
+end
+
+----------------------------------------------------------------------------
+-- Charge ceiling
+----------------------------------------------------------------------------
+-- A Pixii can stop charging below 100 %. On one site the SoC register held
+-- at 90 while charge orders went undelivered and the Pixii app showed 100 %
+-- (srcfl/device-drivers#175). Pixii's Modbus mapping (U8022_06ENG rev 2.20)
+-- gives the SoC register as "State of charge in %", so the SoC is reported
+-- as read. On the same scale it names the upper limits:
+--
+--   40128  SoCMax     maximum state of charge            (SoC_SF, 40177)
+--   40129  SoCMin     minimum state of charge            (SoC_SF, 40177)
+--   40130  SoCRsvMax  maximum reserved state of charge   (SoC_SF, 40177)
+--   40131  SoCRsvMin  minimum reserved state of charge   (SoC_SF, 40177)
+--
+-- Its remaining charging energy (39932) is SoH x (Max Reserved SoC - SoC) x
+-- nominal energy, so charging ends at the reserved maximum. The lower of
+-- SoCMax and SoCRsvMax goes to Core as max_soc_fract, the
+-- @srcful/data-models name for a battery's own maximum SoC.
+--
+-- 39915-39917 are the gross SoC and its minimum and maximum safety limits,
+-- in tenths of a percent. How gross relates to the SoC above is not
+-- documented, so they go to history only, never into the ceiling. Nor is
+-- it documented how the Pixii app turns a SoC into its 100 %, so no remap
+-- is made. Every value goes to history, which shows a field check which
+-- limit holds.
+local REG_SOC_LIMITS = 40128 -- SoCMax, SoCMin, SoCRsvMax, SoCRsvMin
+local REG_GROSS_SOC = 39915  -- gross SoC, min and max safety limits
+local CEILING_METRICS = { "battery_soc_max_pct", "battery_soc_reserve_max_pct" }
+-- Real ceilings sit around 80-100 %. A limit below this is taken as a
+-- misread, not a ceiling: it would stop all charging. Core applies the same
+-- bound.
+local MIN_CEILING_PCT = 50
+local last_ceiling_key = nil
+
+local function soc_point_pct(raw, soc_sf)
+    if raw == nil or raw == 0xffff then return nil end
+    return scale(raw, soc_sf)
+end
+
+local function per_mille_pct(raw)
+    if raw == nil or raw == 0xffff then return nil end
+    return raw / 10
+end
+
+-- Returns the charge ceiling as a fraction, or nil when no limit was read.
+-- A limit below MIN_CEILING_PCT, above 100 % or marked unsupported (0xffff)
+-- is not one.
+local function read_charge_ceiling(soc_sf)
+    local limits = {}
+    local regs = probe_read(REG_SOC_LIMITS, 4, "holding")
+    if regs and regs[4] ~= nil then
+        limits.battery_soc_max_pct = soc_point_pct(regs[1], soc_sf)
+        limits.battery_soc_min_pct = soc_point_pct(regs[2], soc_sf)
+        limits.battery_soc_reserve_max_pct = soc_point_pct(regs[3], soc_sf)
+        limits.battery_soc_reserve_min_pct = soc_point_pct(regs[4], soc_sf)
+    end
+    local gross = probe_read(REG_GROSS_SOC, 3, "holding")
+    if gross and gross[3] ~= nil then
+        limits.battery_soc_gross_pct = per_mille_pct(gross[1])
+        limits.battery_soc_safety_min_pct = per_mille_pct(gross[2])
+        limits.battery_soc_safety_max_pct = per_mille_pct(gross[3])
+    end
+    for name, value in pairs(limits) do
+        host.emit_metric(name, value)
+    end
+
+    local ceiling, source = nil, nil
+    for _, name in ipairs(CEILING_METRICS) do
+        local pct = limits[name]
+        if pct ~= nil and pct >= MIN_CEILING_PCT and pct <= 100 and (ceiling == nil or pct < ceiling) then
+            ceiling, source = pct, name
+        end
+    end
+    local key = ceiling and (tostring(ceiling) .. "/" .. source) or "none"
+    if key ~= last_ceiling_key then
+        if ceiling ~= nil then
+            host.log("info", "Pixii: charge ceiling " .. tostring(ceiling)
+                .. " % from " .. source)
+        elseif last_ceiling_key ~= nil then
+            host.log("info", "Pixii: no charge ceiling read; Core uses its own")
+        end
+        last_ceiling_key = key
+    end
+    if ceiling == nil then return nil end
+    return ceiling / 100
 end
 
 ----------------------------------------------------------------------------
@@ -587,6 +681,8 @@ function driver_poll()
         battery_event1       = status.event1,
     }
     if bat_soc ~= nil then battery.soc = bat_soc end
+    local soc_ceiling = read_charge_ceiling(soc_sf)
+    if soc_ceiling ~= nil then battery.max_soc_fract = soc_ceiling end
     host.emit("battery", battery)
     -- Diagnostics: long-format TS DB
     host.emit_metric("battery_dc_v",      bat_v)

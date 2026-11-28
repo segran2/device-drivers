@@ -31,7 +31,7 @@ changelog, the API reference you decoded the device from — record those in the
 manifest so the driver can be checked against them again later. See
 [Record what you decoded it from](#record-what-you-decoded-it-from).
 
-## The five entry points
+## The entry points
 
 | Function | When |
 |---|---|
@@ -39,7 +39,13 @@ manifest so the driver can be checked against them again later. See
 | `driver_poll()` | repeatedly; returns milliseconds until the next call |
 | `driver_command(action, power_w, cmd)` | when the host wants the device to act |
 | `driver_default_mode()` | hand the device back to itself |
+| `driver_release()` | optional: the owner removed the driver; give back their settings |
 | `driver_cleanup()` | once, when the driver stops |
+
+A safe stop that stays on the device, such as a charger held at 0 A, must not
+outlive FTW. `driver_release()` puts the owner's setting back; `zaptec_cloud`
+is the worked example. A driver whose vendor cloud is slow asks for more time
+per call with `host.set_command_timeout_s(seconds)` in `driver_init`.
 
 Only `driver_poll` is required. A read-only driver defines the first two and
 stops there — and most drivers should. A driver that cannot write cannot break
@@ -464,6 +470,23 @@ all modes. They never grant control or replace a safety limit:
   from the dynamic offer in `max_a`. `device_limit_age_s` is time since the
   successful settings read. Failed reads must not reset its age. Core stops
   treating it as a current limit after two minutes.
+- `current_limit_a`: the current per phase the charger lets the car take
+  now, while the car charges and that current is below the host's last
+  order, which the charger reads back. Set it only from a value that
+  answers that order: one the charger reported at or after it took the
+  order, or any once the order has stood long enough for the value to
+  move. Leave it nil otherwise.
+- `current_limited_by`: `"load_balancer"` when the charger's own load
+  balancing sets `current_limit_a`, shown by an allocation that is below
+  the order and explains the limit. Leave it nil when the cause is not
+  shown. An older vendor reason code is not proof of a cause. Core says
+  the car is limited only when its measured power also falls short.
+- A start held by load balancing: while the car draws nothing and the
+  charger reads back an order of at least 6 A, set `current_limit_a` to the
+  current the load balancing allows and `current_limited_by` to
+  `"load_balancer"` when that current is below 6 A, the least a car charges
+  on. Use the same evidence rule. Core then shows a wait of up to 15 minutes
+  instead of a failed start, and reports a start still missing after that.
 
 A device reading makes a response measured, nothing more. Core calls it
 confirmed only when an identified, separate site meter shows a matching
@@ -478,6 +501,17 @@ for power calculated from the inverter's own battery, PV or load readings.
 Use `power_origin="derived"` for such calculated meter values. Failed reads
 must set `control_power_available=false`; sensor identity alone cannot
 confirm a command.
+
+### Effective EV pilot evidence
+
+`pilot_a` is the current physically signalled to the vehicle, including zero;
+`dynamic_limit_a` is the separately read back dynamic setting. Keep `max_a`
+for older hosts. `pilot_observed_at` is the vendor RFC 3339 value-change time;
+`pilot_confirmed_at_ms` is the Unix-millisecond time a successful REST read or
+stream update confirmed that specific value (zero when unavailable). Do not
+refresh that confirmation merely because another observation or poll arrived.
+An unchanged old source value may still be confirmed by a new read. A missing,
+invalid, future-dated or unconfirmed pilot must not explain a control failure.
 
 ### What a battery can do now
 
@@ -522,3 +556,13 @@ and, when the device reports them, `battery_cell_temp_min_c`,
 `battery_cell_temp_max_c`, `battery_charge_limit_a` and
 `battery_discharge_limit_a`. The inverter's own temperature goes in
 `inverter_temp_c`.
+
+### The battery's own charge ceiling
+
+Some batteries stop charging below 100 % at a limit of their own. When the
+device reports that limit on the same scale as `soc`, send it as
+`max_soc_fract` on `battery`, 0..1. It is the name @srcful/data-models gives a
+battery's own maximum SoC. Core plans and dispatches to the lower of it and
+its own ceiling. Leave it out when the read fails or the value is below 50 %,
+which Core takes as a misread. Never rescale `soc` to make the limit read as
+100 % unless the vendor documents that mapping. `pixii` is the worked example.
